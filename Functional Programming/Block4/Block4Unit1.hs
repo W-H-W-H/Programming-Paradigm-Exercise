@@ -6,10 +6,6 @@ import GHC.Generics
 import FPPrac.Trees
 
 {-
-    The exercise isn't completed.
--}
-
-{-
 Extension of CoreIntro.hs:
 - instructions as program *in* the processor,
 - stack now is list of fixed length,i
@@ -21,8 +17,13 @@ Extension of CoreIntro.hs:
 
 -- ========================================================================
 
+-- ==== Self-explanation ====
+-- sp = current free location in the stack
+
+-- Type Aliases
 type Stack  = [Int]
 type Heap = [Int]
+type Addr = Int
 
 data Op     = Add | Mul | Sub
             deriving (Show, Generic, ToRoseTree)
@@ -30,27 +31,26 @@ data Op     = Add | Mul | Sub
 
 data Instr  = PushConst Int
             | Calc Op
-            | EndProg
 
             -- Extended for Exercise 4-FP.3
-            | Store Int
-            | PushAddr Int
+            | PushAddr Addr -- Stack[sp] := Heap[addr]
+            | Store Addr -- Heap[addr] := Stack[sp - 1]; sp := sp - 1
 
-            -- Extended for Exercise 4-FP.7
+            -- Extended for Exercise 4-FP.7 
             | PushPC
             | EndRep
+
+            | EndProg
             deriving (Show, Generic, ToRoseTree)
 
 
 data Tick = Tick
 
 data Expr = Const Int                   -- for constants
-          | BinExpr Op Expr Expr        -- for ``binary expressions''
-
-          -- Extended for Exercise 4-FP.4 (Guess)
-          | Var Int                     -- for variables (1st param is address in Heap)
-
+            | Var Addr                  -- for variables (extended for Exercise 4-FP.4)
+            | BinExpr Op Expr Expr      -- for ``binary expressions''
             deriving (Show, Generic, ToRoseTree)
+
 
 -- ========================================================================
 -- Processor functions
@@ -64,30 +64,46 @@ alu op = case op of
                 Sub -> (-)
 
 
-core :: [Instr] -> (Int, Int, Stack, Heap) -> Tick -> (Int, Int, Stack, Heap)
+core :: [Instr] -> (Int,Int,Heap,Stack) -> Tick -> (Int,Int,Heap,Stack)
 
-core instrs (pc, sp, stack, heap) tick =  case instrs!!pc of
+core instrs (pc,sp,heap,stack) tick =  case instrs!!pc of
 
-        PushConst n   -> (pc+1, sp+1 , stack <~ (sp,n) , heap )
+        PushConst n   -> (pc+1, sp+1 , heap , stack <~ (sp,n))
 
-        Calc op  -> (pc+1, sp-1 , stack <~ (sp-2,v) , heap )
+        Calc op  -> (pc+1, sp-1 , heap , stack <~ (sp-2,v))
                  where
                    v = alu op (stack!!(sp-2)) (stack!!(sp-1))
 
-        EndProg  -> (-1, sp, stack, heap)
-
         -- Extended for Exercise 4-FP.3
-
-        PushAddr addr -> (pc+1, sp+1, stack <~(sp, v), heap)
+        
+        -- stack[sp] := heap[addr]
+        PushAddr addr -> ( pc + 1, sp + 1, heap, stack <~(sp, v) )
             where
                 v = heap!!addr
 
-        Store addr -> (pc + 1, sp-1, stack, heap <~ (addr, stack!!(sp-1) ) )
+        -- heap[addr] := stack[sp - 1]
+        -- sp := sp - 1 # free current location
+        Store addr -> ( pc + 1, sp - 1, heap <~ (addr, v), stack)
+            where
+                v = stack!!(sp-1)
 
         -- Extended for Exercise 4-FP.7
-        PushPC -> (pc + 1, sp + 1, stack <~ (sp, pc), heap)
 
+        -- Push Current Program Counter
+        PushPC -> ( pc + 1, sp + 1, heap, stack <~(sp, pc) )
 
+        -- If numIter is non-zero
+        EndRep -> if numIter > 0 
+            -- Then pop pc' from the stack (as we will do PushPC again in next iteration),
+            -- and then pc := pc'
+            then ( pc', sp - 1, heap, stack <~ (sp-2, numIter) ) 
+            -- Otherwise, pop 2 elements (pc, expr resp.) in the stack
+            else ( pc + 1, sp - 2 , heap, stack )
+            where
+                pc' = stack!!(sp-1)
+                numIter = stack!!(sp-2) - 1
+
+        EndProg  -> (-1, sp, heap , stack)
 
 -- ========================================================================
 -- example Program for expression: (((2*10) + (3*(4+11))) * (12+5))
@@ -107,13 +123,6 @@ expr = BinExpr Mul
               (Const 12)
               (Const 5))
 
-expr2 = BinExpr Add 
-    (Const 1) 
-    (BinExpr 
-        Mul (Const 3) (Const 4)
-    )
-
-
 -- The program that results in the value of the expression (1105):
 prog = [ PushConst 2
        , PushConst 10
@@ -131,7 +140,7 @@ prog = [ PushConst 2
        , EndProg
        ]
 
-prog2 = [ PushConst 2 , PushConst 10, Calc Mul, Store 3 , PushAddr 2 , EndProg]
+
 
 -- Testing
 clock      = repeat Tick
@@ -142,55 +151,53 @@ test       = putStr
            $ unlines
            $ map show
            $ takeWhile (\(pc,_,_,_) -> pc /= -1)
-           $ scanl (core prog) (0,0,emptyStack,emptyHeap) clock
-
--- My Testing function
-testProg prog = putStr
-    $ unlines $ map show $ takeWhile (\(pc,_,_,_) -> pc /= -1)
-    $ scanl (core prog) (0,0,emptyStack,emptyHeap) clock
-
-
-type Prog = [Instr]
-
--- Exercise 4-FP.1
-
--- (1)
--- $> test
--- $> toRoseTree expr
-
--- Exercise 4-FP.2
-codeGen :: Expr -> [Instr]
-codeGen e = codeGenHelper e ++ [EndProg]
-    where
-        codeGenHelper :: Expr -> [Instr]
-        codeGenHelper (Const n) = PushConst n : []
-        codeGenHelper (Var addr) = PushAddr addr : []
-        codeGenHelper (BinExpr op e1 e2) = codeGenHelper e1 ++ codeGenHelper e2 ++ (Calc op : [])
-
--- Exercise 4-FP.3 (Seems OK)
-
--- Exercise 4-FP.4 (Seems OK)
-data Stmnt = Assign Int Expr 
-    | Repeat Expr [Stmnt]
-    deriving (Show, Generic , ToRoseTree)
-
-codeGen' ::Stmnt -> [Instr]
-codeGen' (Assign addr expr) = init (codeGen expr) ++ (Store addr : EndProg : [] )
+           $ scanl (core prog) (0,0,emptyHeap,emptyStack) clock
 
 
 -- Exercise 4-FP.5
 class CodeGen a where
-    codeGen'' :: a -> [Instr]
+    codeGen :: a -> [Instr]
 
+-- Exercise 4-FP.2
 instance CodeGen Expr where
-    codeGen'' = codeGen
+    codeGen (Const n) = [PushConst n]
+    codeGen (Var addr) = [PushAddr addr]
+    codeGen (BinExpr op e1 e2) = (codeGen e1) ++ (codeGen e2) ++ [Calc op]
+
+-- Exercise 4-FP.4
+data Stmnt = Assign Addr Expr
+            | Repeat Expr [Stmnt]
+    deriving (Show, Generic , ToRoseTree)
 
 instance CodeGen Stmnt where
-    codeGen'' = codeGen'
+    codeGen (Assign addr expr) = codeGen expr ++ [Store addr]
+    
+    -- For Exercise 4-FP.7 
+    -- Calcuate expr and store in the stack, Push pc into the stack, ...
+    codeGen (Repeat expr stmnts) = codeGen expr ++ [PushPC] ++ codeGenForStmnts stmnts ++ [EndRep]
+        where
+            codeGenForStmnts :: [Stmnt] -> [Instr]
+            codeGenForStmnts [] = []
+            codeGenForStmnts (s:ss) = codeGen s ++ codeGenForStmnts ss
 
 -- Exercise 4-FP.6
 compile :: [Stmnt] -> [Instr]
-compile [] = EndProg : []
-compile (s:stmnts) =  init (codeGen'' s) ++ compile stmnts
+compile [] = [EndProg]
+compile (s:ss) = codeGen s ++ compile ss
 
--- Exercise 4-FP.7
+-- Exercise 4-FP.8
+codelines :: [Stmnt]
+codelines = [
+    Assign 0 (Const 0) -- sum := 0
+    , Assign 1 (Const 1) -- j := 1
+    , Repeat (Const 10) [ -- Repeat (10 times)
+            Assign 0 (BinExpr Add (Var 0) (Var 1)) -- sum := sum + j
+            , Assign 1 (BinExpr Add (Var 1) (Const 1)) -- j := j + 1
+        ]
+    ]
+
+testmine = putStr
+           $ unlines
+           $ map show
+           $ takeWhile (\(pc,_,_,_) -> pc /= -1)
+           $ scanl (core $ compile codelines) (0,0,emptyHeap,emptyStack) clock
